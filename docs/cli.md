@@ -35,7 +35,7 @@ molia --listen 0.0.0.0:4001 --bootstrap 127.0.0.1:4000
 - `--new-identity` — overwrite `identity.json`
 - `--clear-peerstore` — delete `peerstore/` then start
 - `--wg` — encrypt RPCs after a plaintext PING/PONG key exchange
-- `--relay` — allow two-hop relay
+- `--relay` — forward `Relay` frames (punch-first; this node is a last-resort hop)
 - `--log-level L` — tracing filter (`info`, `debug`, `molia=debug`, …)
 - `--ttl SECS` — soft TTL for `--put` / `--put-mutable` (default 86400)
 

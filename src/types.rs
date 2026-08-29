@@ -142,6 +142,12 @@ impl PeerInfo {
     pub fn primary_addr(&self) -> Option<SocketAddr> {
         self.addrs.first().copied()
     }
+
+    pub fn push_addr(&mut self, addr: SocketAddr) {
+        if !self.addrs.iter().any(|a| *a == addr) {
+            let _ = self.addrs.try_push(addr);
+        }
+    }
 }
 
 #[cfg(test)]

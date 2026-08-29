@@ -8,7 +8,8 @@ use crate::erasure;
 use crate::event_loop::{drain_cmds, setup_poller, wait, TimerKind, TimingWheel, DRAIN_BATCH};
 use crate::lookup::{Lookup, LookupKind, PrivacyMode};
 use crate::metrics::ShardMetrics;
-use crate::nat::{punch_deadlines, EndpointHint, KEEPALIVE};
+use crate::nat::{candidates, punch_deadlines, EndpointHint, PunchAttempt, KEEPALIVE};
+use crate::relay::pick_relay;
 use crate::peerstore::Peerstore;
 use crate::pool::BufferPool;
 use crate::proto;
@@ -153,6 +154,9 @@ struct ShardCtx {
     timers: TimingWheel,
     keys_by_addr: HashMap<SocketAddr, [u8; 32]>,
     pending_wg: HashMap<SocketAddr, Vec<Vec<u8>>>,
+    mapped: Option<SocketAddr>,
+    punches: HashMap<NodeId, PunchAttempt>,
+    via_relay: HashMap<NodeId, SocketAddr>,
 }
 
 fn run_shard(
@@ -197,6 +201,9 @@ fn run_shard(
         timers: TimingWheel::new(),
         keys_by_addr: HashMap::new(),
         pending_wg: HashMap::new(),
+        mapped: None,
+        punches: HashMap::new(),
+        via_relay: HashMap::new(),
     };
     let (poller, mut events) = setup_poller(&ctx.io)?;
     let now = Instant::now();
@@ -471,6 +478,8 @@ fn handle_app(ctx: &mut ShardCtx, src: SocketAddr, pkt: &[u8], authenticated: bo
         MessageType::FindValueResp => on_find_value_resp(ctx, src, &h, pkt),
         MessageType::StoreReq => on_store(ctx, src, &h, pkt),
         MessageType::AnnounceProviderReq => on_announce(ctx, src, &h, pkt),
+        MessageType::Punch => on_punch(ctx, src, pkt),
+        MessageType::Relay => on_relay(ctx, src, pkt),
         MessageType::Error => {}
         _ => {
             if !h.is_response() && authenticated {
@@ -488,7 +497,7 @@ fn on_ping(ctx: &mut ShardCtx, src: SocketAddr, h: &Header, pkt: &[u8]) {
     let mut buf = ctx.pool.take();
     if let Some(n) = encode_message(
         &Header::response(MessageType::Pong, Qos::Control, h.correlation),
-        &intro_pong(ctx),
+        &intro_pong(ctx, src),
         &mut buf,
     ) {
         send_plain(ctx, src, &buf[..n]);
@@ -497,10 +506,21 @@ fn on_ping(ctx: &mut ShardCtx, src: SocketAddr, h: &Header, pkt: &[u8]) {
 }
 
 fn on_pong(ctx: &mut ShardCtx, src: SocketAddr, _h: &Header, pkt: &[u8]) {
-    let id = decode_body::<proto::Pong>(pkt).and_then(|p| {
+    let pong = decode_body::<proto::Pong>(pkt);
+    if let Some(p) = &pong {
+        if let Some(obs) = p.observed.as_ref().and_then(|a| parse_multiaddr(&a.multiaddr)) {
+            ctx.mapped = Some(obs);
+            let _ = crate::nat::classify(ctx.io.local, obs);
+        }
+    }
+    let id = pong.and_then(|p| {
         note_peer_keys(ctx, src, &p.x25519_pubkey, &p.ed25519_pubkey, &p.binding_sig)
     });
     learn_addr(ctx, src, id);
+    if let Some(id) = id {
+        ctx.via_relay.remove(&id);
+        ctx.punches.remove(&id);
+    }
 }
 
 fn on_negotiate(ctx: &mut ShardCtx, src: SocketAddr, h: &Header) {
@@ -535,6 +555,7 @@ fn on_find_node_resp(ctx: &mut ShardCtx, src: SocketAddr, h: &Header, pkt: &[u8]
     for p in &peers {
         ctx.table.insert(p.clone());
         ctx.peers.upsert(p.clone());
+        start_punch(ctx, p, src);
     }
     learn_addr(ctx, src, peers.first().map(|p| p.id));
     complete_closer(ctx, h.correlation, src, peers);
@@ -604,6 +625,7 @@ fn on_find_value_resp(ctx: &mut ShardCtx, src: SocketAddr, h: &Header, pkt: &[u8
     let closer = peers_from_proto(&resp.closer_peers);
     for p in &closer {
         ctx.table.insert(p.clone());
+        start_punch(ctx, p, src);
     }
     match resp.result {
         Some(proto::find_value_resp::Result::Record(bytes)) => {
@@ -791,10 +813,7 @@ fn on_timer(ctx: &mut ShardCtx, kind: TimerKind) {
             ctx.timers
                 .schedule(now + Duration::from_millis(50), TimerKind::LookupTick);
         }
-        TimerKind::Punch => {
-            let _ = punch_deadlines(now);
-            ShardMetrics::incr(&ctx.metrics.punch_ok);
-        }
+        TimerKind::Punch => on_punch_timer(ctx, now),
     }
 }
 
@@ -916,12 +935,15 @@ fn intro_ping(ctx: &ShardCtx) -> proto::Ping {
     }
 }
 
-fn intro_pong(ctx: &ShardCtx) -> proto::Pong {
+fn intro_pong(ctx: &ShardCtx, src: SocketAddr) -> proto::Pong {
     proto::Pong {
         now_unix_ms: now_unix_ms(),
         x25519_pubkey: ctx.identity.wg_public().as_bytes().to_vec().into(),
         ed25519_pubkey: ctx.identity.verifying_key().as_bytes().to_vec().into(),
         binding_sig: ctx.identity.binding_signature().to_vec().into(),
+        observed: Some(proto::Addr {
+            multiaddr: format!("udp://{src}").into_bytes().into(),
+        }),
     }
 }
 
@@ -960,6 +982,12 @@ fn send_plain(ctx: &mut ShardCtx, dest: SocketAddr, app: &[u8]) {
 fn send_app(ctx: &mut ShardCtx, dest: SocketAddr, x25519: Option<[u8; 32]>, app: &[u8]) {
     if app.len() > PMTU_FLOOR {
         return;
+    }
+    if let Some(id) = peer_id_for(ctx, dest) {
+        if let Some(hop) = ctx.via_relay.get(&id).copied() {
+            send_relay_frame(ctx, hop, id, app);
+            return;
+        }
     }
     let _ = ctx.relay.budget.on_egress(app.len() as u64);
     let key = x25519.or_else(|| ctx.keys_by_addr.get(&dest).copied());
@@ -1055,7 +1083,12 @@ fn flush_pending_wg(ctx: &mut ShardCtx, dest: SocketAddr) {
 
 fn learn_addr(ctx: &mut ShardCtx, src: SocketAddr, id: Option<NodeId>) {
     if let Some(id) = id {
-        let info = PeerInfo::new(id, src);
+        let mut info = ctx
+            .table
+            .get(id)
+            .map(|e| e.info.clone())
+            .unwrap_or_else(|| PeerInfo::new(id, src));
+        info.push_addr(src);
         ctx.table.insert(info.clone());
         ctx.peers.upsert(info);
         ctx.endpoints.insert(
@@ -1107,8 +1140,12 @@ fn peers_from_proto(peers: &[proto::Peer]) -> Vec<PeerInfo> {
         .iter()
         .filter_map(|p| {
             let id = NodeId::from_bytes(&p.peer_id)?;
-            let addr = p.addrs.first().and_then(|a| parse_multiaddr(&a.multiaddr))?;
+            let mut addrs = p.addrs.iter().filter_map(|a| parse_multiaddr(&a.multiaddr));
+            let addr = addrs.next()?;
             let mut info = PeerInfo::new(id, addr);
+            for a in addrs {
+                info.push_addr(a);
+            }
             if p.x25519_pubkey.len() == 32 {
                 let mut x = [0u8; 32];
                 x.copy_from_slice(&p.x25519_pubkey);
@@ -1117,6 +1154,250 @@ fn peers_from_proto(peers: &[proto::Peer]) -> Vec<PeerInfo> {
             Some(info)
         })
         .collect()
+}
+
+fn peer_id_for(ctx: &ShardCtx, dest: SocketAddr) -> Option<NodeId> {
+    ctx.table
+        .all_peers()
+        .find(|e| e.info.addrs.iter().any(|a| *a == dest))
+        .map(|e| e.info.id)
+}
+
+fn our_candidates(ctx: &ShardCtx) -> Vec<SocketAddr> {
+    candidates(ctx.io.local, ctx.mapped)
+}
+
+fn encode_addrs(addrs: &[SocketAddr]) -> Vec<proto::Addr> {
+    addrs
+        .iter()
+        .map(|a| proto::Addr {
+            multiaddr: format!("udp://{a}").into_bytes().into(),
+        })
+        .collect()
+}
+
+fn start_punch(ctx: &mut ShardCtx, peer: &PeerInfo, rendezvous: SocketAddr) {
+    if peer.id == ctx.identity.node_id() {
+        return;
+    }
+    if ctx.endpoints.get(&peer.id).is_some_and(|e| e.fresh()) {
+        return;
+    }
+    if ctx.punches.contains_key(&peer.id) || ctx.via_relay.contains_key(&peer.id) {
+        return;
+    }
+    let now = Instant::now();
+    let windows = punch_deadlines(now);
+    let cands: Vec<SocketAddr> = peer.addrs.iter().copied().collect();
+    if cands.is_empty() {
+        return;
+    }
+    ctx.punches.insert(
+        peer.id,
+        PunchAttempt {
+            peer: peer.id,
+            candidates: cands,
+            rendezvous,
+            bursts_done: 0,
+            next_burst: now,
+            relay_at: windows[1] + Duration::from_millis(250),
+            replied: false,
+        },
+    );
+    send_punch_msg(ctx, rendezvous, peer.id, &our_candidates(ctx));
+    burst_punch(ctx, peer.id);
+    ctx.timers.schedule(windows[0], TimerKind::Punch);
+}
+
+fn send_punch_msg(ctx: &mut ShardCtx, hop: SocketAddr, target: NodeId, cands: &[SocketAddr]) {
+    let mut buf = ctx.pool.take();
+    if let Some(n) = encode_message(
+        &Header::request(MessageType::Punch, Qos::Control, next_corr(ctx)),
+        &proto::Punch {
+            target_id: target.0.to_vec().into(),
+            from_id: ctx.identity.node_id().0.to_vec().into(),
+            candidates: encode_addrs(cands),
+        },
+        &mut buf,
+    ) {
+        send_plain(ctx, hop, &buf[..n]);
+    }
+    ctx.pool.recycle(buf);
+}
+
+fn burst_punch(ctx: &mut ShardCtx, id: NodeId) {
+    let Some(cands) = ctx.punches.get(&id).map(|p| p.candidates.clone()) else {
+        return;
+    };
+    for dest in cands {
+        ping(ctx, dest, Some(id));
+    }
+    if let Some(p) = ctx.punches.get_mut(&id) {
+        p.bursts_done = p.bursts_done.saturating_add(1);
+        let w = punch_deadlines(Instant::now());
+        p.next_burst = w[0];
+    }
+    ShardMetrics::incr(&ctx.metrics.punch_ok);
+}
+
+fn on_punch(ctx: &mut ShardCtx, src: SocketAddr, pkt: &[u8]) {
+    let Some(p) = decode_body::<proto::Punch>(pkt) else {
+        return;
+    };
+    let Some(target) = NodeId::from_bytes(&p.target_id) else {
+        return;
+    };
+    let Some(from) = NodeId::from_bytes(&p.from_id) else {
+        return;
+    };
+    if target == ctx.identity.node_id() {
+        let cands: Vec<SocketAddr> = p
+            .candidates
+            .iter()
+            .filter_map(|a| parse_multiaddr(&a.multiaddr))
+            .collect();
+        if cands.is_empty() {
+            return;
+        }
+        let mut info = ctx
+            .table
+            .get(from)
+            .map(|e| e.info.clone())
+            .unwrap_or_else(|| PeerInfo::new(from, cands[0]));
+        for a in &cands {
+            info.push_addr(*a);
+        }
+        ctx.table.insert(info.clone());
+        let now = Instant::now();
+        let windows = punch_deadlines(now);
+        let attempt = ctx.punches.entry(from).or_insert_with(|| PunchAttempt {
+            peer: from,
+            candidates: cands.clone(),
+            rendezvous: src,
+            bursts_done: 0,
+            next_burst: now,
+            relay_at: windows[1] + Duration::from_millis(250),
+            replied: false,
+        });
+        attempt.candidates = cands;
+        attempt.rendezvous = src;
+        if !attempt.replied {
+            attempt.replied = true;
+            send_punch_msg(ctx, src, from, &our_candidates(ctx));
+        }
+        burst_punch(ctx, from);
+        ctx.timers.schedule(windows[0], TimerKind::Punch);
+        return;
+    }
+    let Some(dest) = ctx.table.get(target).and_then(|e| e.info.primary_addr()) else {
+        return;
+    };
+    let mut buf = ctx.pool.take();
+    if let Some(n) = encode_message(
+        &Header::request(MessageType::Punch, Qos::Control, next_corr(ctx)),
+        &p,
+        &mut buf,
+    ) {
+        send_plain(ctx, dest, &buf[..n]);
+        ShardMetrics::add(&ctx.metrics.relay_bytes, n as u64);
+    }
+    ctx.pool.recycle(buf);
+}
+
+fn on_punch_timer(ctx: &mut ShardCtx, now: Instant) {
+    let ids: Vec<NodeId> = ctx.punches.keys().copied().collect();
+    let mut again = false;
+    for id in ids {
+        let fresh = ctx.endpoints.get(&id).is_some_and(|e| e.fresh());
+        if fresh {
+            ctx.punches.remove(&id);
+            ctx.via_relay.remove(&id);
+            continue;
+        }
+        let Some(p) = ctx.punches.get(&id) else {
+            continue;
+        };
+        if p.bursts_done < 2 && now >= p.next_burst {
+            burst_punch(ctx, id);
+            again = true;
+        }
+        let Some(p) = ctx.punches.get(&id) else {
+            continue;
+        };
+        if p.bursts_done >= 2 && now >= p.relay_at {
+            let hop = p.rendezvous;
+            ctx.punches.remove(&id);
+            if ctx.relay.enabled || ctx.table.get(id).is_some() {
+                ctx.via_relay.insert(id, hop);
+            }
+            continue;
+        }
+        again = true;
+    }
+    if again {
+        ctx.timers.schedule(now + Duration::from_millis(250), TimerKind::Punch);
+    }
+}
+
+fn on_relay(ctx: &mut ShardCtx, src: SocketAddr, pkt: &[u8]) {
+    let Some(r) = decode_body::<proto::Relay>(pkt) else {
+        return;
+    };
+    let Some(dest) = NodeId::from_bytes(&r.dest_id) else {
+        return;
+    };
+    let Some(from) = NodeId::from_bytes(&r.from_id) else {
+        return;
+    };
+    if dest == ctx.identity.node_id() {
+        ctx.via_relay.insert(from, src);
+        handle_app(ctx, src, &r.payload, false);
+        return;
+    }
+    if !ctx.relay.forward(r.payload.len(), false) {
+        return;
+    }
+    let Some(next) = ctx.table.get(dest).and_then(|e| e.info.primary_addr()) else {
+        return;
+    };
+    let mut buf = ctx.pool.take();
+    if let Some(n) = encode_message(
+        &Header::request(MessageType::Relay, Qos::Coordination, next_corr(ctx)),
+        &r,
+        &mut buf,
+    ) {
+        send_plain(ctx, next, &buf[..n]);
+        ShardMetrics::add(&ctx.metrics.relay_bytes, n as u64);
+    }
+    ctx.pool.recycle(buf);
+}
+
+fn send_relay_frame(ctx: &mut ShardCtx, hop: SocketAddr, dest: NodeId, app: &[u8]) {
+    if hop == ctx.io.local {
+        return;
+    }
+    let hop = {
+        let cands: Vec<(NodeId, SocketAddr)> = ctx
+            .table
+            .all_peers()
+            .filter_map(|e| e.info.primary_addr().map(|a| (e.info.id, a)))
+            .collect();
+        pick_relay(ctx.identity.node_id(), dest, &cands).unwrap_or(hop)
+    };
+    let mut buf = ctx.pool.take();
+    if let Some(n) = encode_message(
+        &Header::request(MessageType::Relay, Qos::Coordination, next_corr(ctx)),
+        &proto::Relay {
+            dest_id: dest.0.to_vec().into(),
+            from_id: ctx.identity.node_id().0.to_vec().into(),
+            payload: app.to_vec().into(),
+        },
+        &mut buf,
+    ) {
+        send_plain(ctx, hop, &buf[..n]);
+        ShardMetrics::add(&ctx.metrics.relay_bytes, n as u64);
+    }
+    ctx.pool.recycle(buf);
 }
 
 fn parse_multiaddr(raw: &[u8]) -> Option<SocketAddr> {

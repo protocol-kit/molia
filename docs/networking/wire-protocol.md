@@ -41,6 +41,8 @@ u32 stream_id    // 0 if unused; for long ops/streams
 - 7 FIND_VALUE_REQ, 8 FIND_VALUE_RESP
 - 9 STORE_REQ, 10 STORE_RESP
 - 11 ANNOUNCE_PROVIDER_REQ, 12 ANNOUNCE_PROVIDER_RESP
+- 13 PUNCH (rendezvous + candidates)
+- 14 RELAY (inner RPC datagram)
 - 250 TRACE_HINT (best‑effort), 251 CACHE_HINT (best‑effort)
 - 255 ERROR
 

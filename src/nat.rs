@@ -1,6 +1,6 @@
 //! NAT classification, keepalives, rendezvous hints, and hole-punch windows.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 pub const KEEPALIVE: Duration = Duration::from_secs(20);
@@ -43,6 +43,34 @@ pub fn classify(declared: SocketAddr, observed: SocketAddr) -> NatType {
 /// Timed simultaneous-open window (2 × 250 ms jitter).
 pub fn punch_deadlines(now: Instant) -> [Instant; 2] {
     [now + Duration::from_millis(250), now + Duration::from_millis(500)]
+}
+
+/// Host + mapped candidates. Unspecified bind becomes loopback for local tests.
+pub fn candidates(local: SocketAddr, mapped: Option<SocketAddr>) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    let host = if local.ip().is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
+    } else {
+        local
+    };
+    out.push(host);
+    if let Some(m) = mapped {
+        if !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug)]
+pub struct PunchAttempt {
+    pub peer: crate::types::NodeId,
+    pub candidates: Vec<SocketAddr>,
+    pub rendezvous: SocketAddr,
+    pub bursts_done: u8,
+    pub next_burst: Instant,
+    pub relay_at: Instant,
+    pub replied: bool,
 }
 
 pub struct RelayBudget {
@@ -92,6 +120,15 @@ mod tests {
     fn classify_same_is_full_cone() {
         let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
         assert_eq!(classify(a, a), NatType::FullCone);
+    }
+
+    #[test]
+    fn candidates_include_mapped() {
+        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4001);
+        let mapped = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 5555);
+        let c = candidates(local, Some(mapped));
+        assert!(c.contains(&SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001)));
+        assert!(c.contains(&mapped));
     }
 
     #[test]

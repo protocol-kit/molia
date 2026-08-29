@@ -49,6 +49,8 @@ This document details the transport stack and NAT traversal strategy for Molia D
 
 ## 5) Hole Punching (UDP)
 
+**Crate:** PONG carries `observed` (mapped `udp://ip:port`). On FIND_NODE / closer peers, send `Punch` (type 13) via the reporter; both sides burst PING at 0/250/500 ms toward advertised candidates.
+
 - Rendezvous: lightweight coordinators exchange encrypted endpoint hints and timing windows.
 - Simultaneous open: both sides send timed SYN‑like bursts (WG initiation) to each other’s candidates.
 - Consent tokens: short‑lived, signed tokens to throttle abuse and validate intent.
@@ -57,6 +59,8 @@ This document details the transport stack and NAT traversal strategy for Molia D
 ---
 
 ## 6) Relays (TURN‑like) – Last Resort
+
+**Crate:** if the punch windows close with no PONG, later RPCs wrap in `Relay` (type 14) and go through the rendezvous. The hop must run `--relay` to forward. Direct PONG clears the relay path.
 
 - Minimal relay API: forward WG datagrams between two peers; no application visibility.
 - Budgeting: cap relay egress per peer and globally; prioritize control traffic.

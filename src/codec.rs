@@ -23,6 +23,8 @@ pub enum MessageType {
     StoreResp = 10,
     AnnounceProviderReq = 11,
     AnnounceProviderResp = 12,
+    Punch = 13,
+    Relay = 14,
     TraceHint = 250,
     CacheHint = 251,
     Error = 255,
@@ -43,6 +45,8 @@ impl MessageType {
             10 => Self::StoreResp,
             11 => Self::AnnounceProviderReq,
             12 => Self::AnnounceProviderResp,
+            13 => Self::Punch,
+            14 => Self::Relay,
             250 => Self::TraceHint,
             251 => Self::CacheHint,
             255 => Self::Error,
@@ -59,6 +63,8 @@ impl MessageType {
                 | Self::FindValueReq
                 | Self::StoreReq
                 | Self::AnnounceProviderReq
+                | Self::Punch
+                | Self::Relay
         )
     }
 }

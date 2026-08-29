@@ -22,6 +22,7 @@ message Pong {
   bytes x25519_pubkey = 2;
   bytes ed25519_pubkey = 3;
   bytes binding_sig = 4;
+  Addr observed = 5; // how the peer saw us (mapped address)
 }
 
 message FindNodeReq { bytes target_id = 1; uint32 limit = 2; }
@@ -108,4 +109,18 @@ message Binding {
   bytes ed25519_pubkey = 1;
   bytes x25519_pubkey = 2;
   bytes signature = 3;
+}
+
+// Rendezvous: if target_id is us, punch toward `from` candidates; else forward.
+message Punch {
+  bytes target_id = 1;
+  bytes from_id = 2;
+  repeated Addr candidates = 3;
+}
+
+// Two-hop: deliver `payload` (one RPC datagram) to dest_id.
+message Relay {
+  bytes dest_id = 1;
+  bytes from_id = 2;
+  bytes payload = 3;
 }
