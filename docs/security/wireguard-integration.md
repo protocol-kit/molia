@@ -1,12 +1,14 @@
 # WireGuard Per‑Shard Integration
 
-This document specifies how to integrate a userspace WireGuard engine per shard, aligned with [Shared-Nothing Architecture](../architecture/shared-nothing-architecture.md), [IO Design](../networking/io-design.md), and the blueprint's transport security shift to WireGuard.
+This document specifies how to integrate a userspace WireGuard engine per shard, aligned with [Shared-Nothing Architecture](../architecture/shared-nothing-architecture.md), [I/O Design](../networking/io-design.md), and [Architecture Overview](../overview.md) §6 (transport security).
 
 ---
 
 ## 0) Goals & Constraints
 
 - One WireGuard instance per shard; no cross-shard locks or shared mutable state.
+
+**Crate:** `--wg` sets `NodeConfig.plaintext = false`. Bootstrap PING/PONG stay plaintext and carry `x25519_pubkey`, `ed25519_pubkey`, and `binding_sig`. After keys, RPCs are dummy IPv4 + BoringTun; handshake-only UDP is queued and flushed. Mixed plaintext/`--wg` still accepts plaintext RPC. No OS TUN.
 - Maintain XOR locality and per-core affinity; avoid cross-core handoffs on crypto.
 - Zero-alloc hot path preserved; bounded batching for crypto without hurting tail latency.
 
@@ -114,3 +116,7 @@ This document specifies how to integrate a userspace WireGuard engine per shard,
 - Handshake flood tests (cookie defense), NAT traversal mixes, churn under load.
 - PMTU shifts; confirm clamping and behavior without fragmentation.
 - Crash/restart: ensure re-handshake works and bindings persist.
+
+---
+
+[← Back to Security](README.md)

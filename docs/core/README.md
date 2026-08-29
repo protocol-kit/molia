@@ -22,7 +22,7 @@ Comprehensive guide to the Kademlia distributed hash table, including:
 **Why Kademlia?**
 - Logarithmic lookup complexity: O(log N) hops
 - Resilient to churn via LRU and parallelism
-- Symmetric metric enables efficient routing
+- Symmetric XOR distance enables efficient routing
 - Well-studied and battle-tested (BitTorrent, IPFS)
 
 ---
@@ -32,13 +32,12 @@ Comprehensive guide to the Kademlia distributed hash table, including:
 Molia builds on Kademlia with:
 - **Latency-biased routing**: Prefer lower-RTT peers at equal XOR distance
 - **Adaptive α**: Scale parallelism up on loss, down on healthy paths
-- **Query blinding**: Optional privacy via neighbor probes
-- **WireGuard security**: All traffic authenticated and encrypted
+- **Query blinding**: Neighbor probes to mask the exact key (on by default)
+- **WireGuard security**: Optional `--wg` after plaintext intro PING/PONG
 - **Sybil resistance**: Proof-of-work and behavioral scoring
 
-See [../OVERVIEW.md](../OVERVIEW.md) for the complete architecture.
+See the [Architecture Overview](../overview.md) for the complete design.
 
 ---
 
-[← Back to Documentation](../)
-
+[← Back to Documentation](../README.md)

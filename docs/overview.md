@@ -1,6 +1,8 @@
 # Molia DHT
 
-A practical, production-ready distributed hash table design with security, privacy, performance, and operability baked in. This blueprint targets Internet-scale deployment across desktops, servers, mobile, and browsers.
+A practical DHT: Kademlia XOR routing, per-core shared-nothing shards, custom event loops (no Tokio), Protobuf RPCs, optional userspace WireGuard, and a WebRTC gateway for browsers.
+
+The crate in this repo implements that design. Operator flags are in [cli.md](cli.md). Specs: [architecture](architecture/), [networking](networking/), [security](security/), [core](core/), [advanced](advanced/). Reading paths: [documentation index](README.md).
 
 ---
 
@@ -22,7 +24,7 @@ A practical, production-ready distributed hash table design with security, priva
 
 ## 1) Overlay: ID Space, Distance, and Topology
 
-- **Node IDs**: 256‑bit (Blake3 of the node’s static Ed25519 public key). Uniform, self‑certifying.
+- **Node IDs**: 256‑bit (BLAKE3 of the node’s static Ed25519 public key). Uniform, self‑certifying.
 - **Key Space**: 256‑bit content and namespace keys (multihash‑style). Prefixes enable range/prefix features.
 - **Distance Metric**: XOR distance (Kademlia‑style) with **latency bias**: tie‑breaks by observed RTT.
 - **Routing Table**: k‑bucket tree with adaptive split; **K = 16…32** per bucket depending on memory tier.
@@ -35,8 +37,8 @@ A practical, production-ready distributed hash table design with security, priva
 
 ## 2) Transport & NAT Traversal
 
-- **Primary Transport**: **UDP** with WireGuard tunnels (userspace).
-- **Fallbacks**: TCP (hole‑punching where possible); **WebRTC DataChannels** for browsers.
+- **Primary Transport**: **UDP**. Default is plaintext RPC; `--wg` wraps after a plaintext intro PING/PONG (BoringTun, no OS TUN).
+- **Browser fallback**: `--webrtc-gateway` runs ICE/DTLS/SCTP (str0m) and maps DataChannel `molia` onto the same 12-byte RPC frames. See [transport §7](networking/transport-nat-traversal.md#7-webrtc-datachannels-browser-fallback).
 - **NAT/Firewall**: STUN‑like discovery via lightweight **rendezvous relays**; TURN‑like relaying as last resort.
 - **Hole Punching**: Automated coordination using signed peer records; consent‑freshness ≤30 min.
 - **Address Records**: Multiaddr‑style; include observed addresses and proof‑of‑reachability.
@@ -56,12 +58,15 @@ message Record {
   bytes owner_pubkey;         // Ed25519 (mutable/provider)
   bytes signature;            // sig over (key,value,sequence,ttl,nb)
   bytes validators;           // bitmap of passed validations
+  uint32 kind;
+  bytes namespace;            // mutable: key = BLAKE3(owner ‖ ns ‖ salt)
+  bytes salt;
 }
 ```
 
 **Types**
 - **Immutable**: `key = hash(value)`; stored as content‑addressed blobs.
-- **Mutable (NAMED)**: `key = hash(owner_pubkey || namespace || salt)`, monotonic `sequence` with sig.
+- **Mutable (NAMED)**: `key = BLAKE3(owner_pubkey || namespace || salt)`, monotonic `sequence` with Ed25519 sig over `(key, value, sequence, ttl, not_before)`.
 - **Provider (Routing)**: maps a content key → list of provider peer IDs + metadata (chunking supported).
 - **Secondary Index** (optional): prefix‑tree shards to support prefix/range queries via bounded walk.
 
@@ -101,7 +106,7 @@ message Record {
 
 - **Identity**: Ed25519 keypairs; NodeID = BLAKE3(pubkey). **Self‑certifying peer IDs**.
 - **Transport Security**: WireGuard protocol (no tunneling, just state machine; e.g., [BoringTun](https://github.com/cloudflare/boringtun)) with identity bound to NodeID.
-- **Silent by default**: unknown peers receive no reply prior to a valid WireGuard handshake (cookie gating).
+- **Silent by default** (design): unknown peers receive no reply prior to a valid WireGuard handshake (cookie gating). **Crate:** without `--wg` the node answers plaintext RPC; with `--wg` intro PING/PONG are plaintext, then BoringTun.
 - **Sybil Resistance** (mix‑and‑match based on threat):
   - **Capped Admission**: proof‑of‑work (adaptive), or proof‑of‑uptime, or proof‑of‑resource (storage bw).
   - **DHT‑Placement Hardening**: salt bucket boundaries daily; discourage targeted collocation.
@@ -194,23 +199,18 @@ interface DHT {
 
 ---
 
-## 13) Implementation Roadmap (12 Weeks)
+## 13) Implementation status
 
-**Wk 1–2**: Core types, crypto (Ed25519, BLAKE3), UDP server/client, protobufs.
+The `molia` crate covers the original 12-week outline:
 
-**Wk 3–4**: Routing table + iterative lookups; bootstrap; basic STORE/FIND_VALUE.
+- Types, Ed25519 + BLAKE3, `identity.json`, 12-byte header + Protobuf (`prost` / `protox`, no system `protoc`)
+- Per-shard `polling` loops, `SO_REUSEPORT` UDP, k-buckets, iterative lookup, STORE / FIND_VALUE
+- Per-shard BoringTun (no OS TUN); `--wg` after plaintext PING/PONG key exchange
+- Providers, Reed–Solomon 10:4 for large blobs, mutable records, peerstore WAL
+- Query blinding on by default, Sybil buckets / tokens, Prometheus text metrics, chaos tests
+- `--webrtc-gateway`: ICE/DTLS/SCTP (str0m, vendored OpenSSL for DTLS) via `POST /rtc/offer`; DataChannel `molia`; `POST /rpc` HTTP fallback
 
-**Wk 5–6**: NAT traversal (rendezvous, STUN‑like), provider records, erasure coding.
-
-**Wk 7–8**: Mutable records + signatures, TTL/refresh, opportunistic caching.
-
-**Wk 9**: Privacy features (query blinding), rate limiting, abuse scoring.
-
-**Wk 10**: Observability (metrics, logs, basic dashboards), chaos tests (churn/partitions).
-
-**Wk 11**: Browser/WebRTC integration, relay budgeting, mobile mode.
-
-**Wk 12**: Hardening, fuzzing, perf tuning, staged rollout.
+Linux eBPF demux remains optional (see [advanced/linux-reuseport-ebpf.md](advanced/linux-reuseport-ebpf.md)).
 
 ---
 
@@ -232,11 +232,12 @@ interface DHT {
 
 ---
 
-## 16) Build Notes
+## 16) Build notes
 
-- Language suggestions: **Rust** (boringtun, ed25519‑dalek, blake3, prost).
-- Keep hot paths lock‑free; use arenas for message buffers; avoid heap churn.
-- Persistent peerstore with crash‑safe WAL.
+- **Rust 1.85+** crate: `boringtun`, `ed25519-dalek` 1.0, `blake3`, `prost` + `protox`, `polling`, `str0m` (openssl + vendored). No Tokio.
+- Identity file: `{data-dir}/identity.json` (`ed25519_seed`, `x25519_secret`, derived pubkeys, `node_id`). Legacy `identity.bin` is migrated once.
+- Peerstore + records: `{data-dir}/peerstore/shard-N/wal.log` (peer upserts and DHT `Record` frames).
+- CLI: [cli.md](cli.md). Binary: `cargo run --bin molia`.
 
 ---
 
@@ -256,3 +257,5 @@ interface DHT {
 - **Erasure Coding**: adds parity chunks so any `k` of `n` chunks reconstruct data.
 
 ---
+
+[← Back to Documentation](README.md)

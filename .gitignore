@@ -1,2 +1,5 @@
 .history
 .DS_Store
+/target
+**/*.rs.bk
+peerstore/

@@ -1,6 +1,6 @@
 # Transport & NAT Traversal
 
-This document details the transport stack and NAT traversal strategy for Molia DHT. It complements [IO Design](io-design.md) (I/O paths), [WireGuard Integration](../security/wireguard-integration.md) (per‑shard crypto/sessioning), and the blueprint's section "Transport & NAT Traversal".
+This document details the transport stack and NAT traversal strategy for Molia DHT. It complements [I/O Design](io-design.md) (I/O paths), [WireGuard Integration](../security/wireguard-integration.md) (per-shard crypto/sessioning), and [Architecture Overview](../overview.md) §2 (Transport & NAT Traversal).
 
 ---
 
@@ -17,7 +17,7 @@ This document details the transport stack and NAT traversal strategy for Molia D
 
 - Base: UDP sockets per shard (`SO_REUSEPORT`).
 - Security: userspace WireGuard per shard; see [WireGuard Integration](../security/wireguard-integration.md) (e.g., [BoringTun](https://github.com/cloudflare/boringtun)).
-- RPC: length‑delimited framing over plaintext payloads after WG decapsulation.
+- RPC: [Wire Protocol](wire-protocol.md) header + Protobuf body over plaintext payloads after WG decapsulation. UDP provides framing (no extra length prefix).
 - Multiplexing: logical streams by request correlation IDs; no kernel stream abstraction.
 - Pacing: token buckets per peer and per `/24`; optional NIC pacing.
 
@@ -33,7 +33,7 @@ This document details the transport stack and NAT traversal strategy for Molia D
 
 ## 3) Packet Framing & Limits
 
-- Frame: `[msgType:u8][payload...]` inside WG payload; strict size checks.
+- Frame: fixed Wire Protocol header (`version`, `type`, `flags`, `qos`, `correlation`, `stream_id`) followed by a Protobuf body inside the WG payload; strict size checks. See [Wire Protocol](wire-protocol.md).
 - Max wire payload: `min(local_mtu, path_mtu) − (IP+UDP+WG_overhead)`; clamp to avoid fragmentation.
 - Vectored I/O for composing headers + payload; zero‑copy decode over borrowed slices.
 
@@ -66,9 +66,15 @@ This document details the transport stack and NAT traversal strategy for Molia D
 
 ## 7) WebRTC DataChannels (Browser Fallback)
 
-- Browsers use ICE (STUN/TURN) to establish SCTP over DTLS data channels.
-- Gateway shim maps DHT RPC frames onto DataChannels when UDP+WG is not available.
-- Same request shaping and IDs; larger per‑message overhead tolerated as fallback.
+**Crate:** `--webrtc-gateway` is an HTTP thread plus one Sans-I/O ICE/DTLS/SCTP session (str0m) per accepted offer. No Tokio. DTLS uses vendored OpenSSL (`str0m` rust-crypto conflicts with BoringTun’s pinned `x25519-dalek`).
+
+- Browser: role **Gateway (ICE)** → `createDataChannel("molia")` → wait for host candidates → `POST /rtc/offer` (raw SDP or JSON `{sdp}`) → set remote answer.
+- Node: ICE-lite, host candidates on `0.0.0.0:0` (advertise `127.0.0.1` and a LAN IP; Firefox often rejects loopback-only).
+- One DataChannel message = one RPC datagram (same 12-byte header + Protobuf as UDP). Replies write back on the channel.
+- `POST /rpc` is an HTTP fallback with the same frame shape.
+- Two-tab room signaling (`/room/…`) stays in-browser P2P; `webrtc_play` is that page without a DHT node; `webrtc_dc` is an in-process `dc_pair()` shim.
+
+Page: [playgroud/webrtc/](../../playgroud/webrtc/). CLI: [cli.md](../cli.md).
 
 ---
 
@@ -123,10 +129,10 @@ This document details the transport stack and NAT traversal strategy for Molia D
 
 ## 14) Rollout & Compatibility
 
-1. Direct UDP+WG paths; verify PMTU and keepalives.
+1. Direct UDP (plaintext or `--wg`); verify PMTU and keepalives.
 2. Enable rendezvous hole punching; measure success matrix across NAT types.
 3. Introduce relays with strict budgets; wire telemetry and alerts.
-4. Add WebRTC fallback path for browsers.
+4. WebRTC: `--webrtc-gateway` ICE/DTLS/SCTP is in this crate; STUN/TURN for remote NATs is still browser-side / future.
 
 ---
 
@@ -135,3 +141,7 @@ This document details the transport stack and NAT traversal strategy for Molia D
 - Direct paths established; no IP fragmentation; PMTU logic proven.
 - Hole punching succeeds at target rate; fallbacks work; budgets enforced.
 - Observability dashboards and alerts configured; load tests pass.
+
+---
+
+[← Back to Networking](README.md)

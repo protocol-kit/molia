@@ -1,0 +1,111 @@
+syntax = "proto3";
+package molia.v1;
+
+message Key32 { bytes v = 1; }
+message PeerId { bytes v = 1; }
+message Addr { bytes multiaddr = 1; }
+
+message Capabilities {
+  uint32 version = 1;
+  uint64 bitmap = 2;
+  uint32 max_msg_bytes = 3;
+}
+
+message Ping {
+  uint64 now_unix_ms = 1;
+  bytes x25519_pubkey = 2;
+  bytes ed25519_pubkey = 3;
+  bytes binding_sig = 4;
+}
+message Pong {
+  uint64 now_unix_ms = 1;
+  bytes x25519_pubkey = 2;
+  bytes ed25519_pubkey = 3;
+  bytes binding_sig = 4;
+}
+
+message FindNodeReq { bytes target_id = 1; uint32 limit = 2; }
+message FindNodeResp { repeated Peer peers = 1; }
+
+message Peer {
+  bytes peer_id = 1;
+  repeated Addr addrs = 2;
+  uint32 rtt_ms = 3;
+  bytes x25519_pubkey = 4;
+}
+
+message FindValueReq { bytes key = 1; uint32 provider_limit = 2; }
+message FindValueResp {
+  oneof result {
+    bytes record = 1;
+    Providers providers = 2;
+  }
+  repeated Peer closer_peers = 3;
+}
+
+message Providers { repeated Provider providers = 1; }
+message Provider { bytes peer_id = 1; bytes meta = 2; }
+
+message StoreReq {
+  bytes record = 1;
+  bytes admission_token = 2;
+  bytes cost_stamp = 3;
+}
+message StoreResp {
+  enum Code { OK = 0; REJECTED = 1; TOO_LARGE = 2; INVALID = 3; }
+  Code code = 1;
+  string reason = 2;
+}
+
+message NegotiateReq { Capabilities want = 1; }
+message NegotiateResp { Capabilities agreed = 1; }
+
+message AnnounceProviderReq {
+  bytes key = 1;
+  Provider self_descriptor = 2;
+  bytes record = 3;
+  bytes admission_token = 4;
+  bytes cost_stamp = 5;
+}
+message AnnounceProviderResp {
+  enum Code { OK = 0; REJECTED = 1; RATE_LIMITED = 2; INVALID = 3; }
+  Code code = 1;
+  string reason = 2;
+}
+
+message Record {
+  bytes key = 1;
+  bytes value = 2;
+  uint64 sequence = 3;
+  uint64 ttl_secs = 4;
+  uint64 not_before_unix = 5;
+  bytes owner_pubkey = 6;
+  bytes signature = 7;
+  bytes validators = 8;
+  uint32 kind = 9;
+  bytes namespace = 10;
+  bytes salt = 11;
+}
+
+message Error {
+  enum Code {
+    UNSPECIFIED = 0;
+    NOT_FOUND = 1;
+    BUSY = 2;
+    RATE_LIMITED = 3;
+    INVALID = 4;
+    TOO_LARGE = 5;
+    UNSUPPORTED = 6;
+    UNAUTHORIZED = 7;
+    INTERNAL = 8;
+  }
+  Code code = 1;
+  string reason = 2;
+  uint32 retry_after_ms = 3;
+}
+
+message Binding {
+  bytes ed25519_pubkey = 1;
+  bytes x25519_pubkey = 2;
+  bytes signature = 3;
+}

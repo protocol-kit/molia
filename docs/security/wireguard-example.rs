@@ -1,3 +1,7 @@
+//! Illustrative BoringTun `Tunn` usage for handshake + encapsulate/decapsulate.
+//! Production Molia feeds DHT RPC bytes into the same APIs (no OS TUN device).
+//! See `wireguard-integration.md`.
+
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use rand_core::OsRng;
@@ -61,7 +65,7 @@ fn main() {
 /// Move datagrams across the "wire" until there’s nothing left to do.
 /// This processes handshake retries, keepalives, and data.
 /// It follows the docs for `decapsulate`: if we get `WriteToNetwork`,
-/// call again with an empty datagram until `Done`.  [oai_citation:1‡Docs.rs](https://docs.rs/boringtun/latest/boringtun/noise/struct.Tunn.html)
+/// call again with an empty datagram until `Done`.
 fn pump(
     a: &mut Tunn,
     b: &mut Tunn,

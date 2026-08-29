@@ -157,33 +157,6 @@ cargo test --features allocation-tracking  # Verify zero-alloc paths
 
 ---
 
-## Roadmap
-
-### Phase 1: Foundation (Weeks 1-4)
-- [x] Core types, crypto primitives, UDP server
-- [x] Routing table and iterative lookups
-- [x] Basic STORE/FIND_VALUE operations
-
-### Phase 2: Transport & Security (Weeks 5-8)
-- [x] WireGuard integration per shard
-- [x] NAT traversal (rendezvous, hole punching)
-- [x] Provider records and erasure coding
-- [x] Mutable records with signatures
-
-### Phase 3: Hardening (Weeks 9-10)
-- [ ] Privacy features (query blinding, relays)
-- [ ] Rate limiting and abuse scoring
-- [ ] Observability stack (metrics, logs, dashboards)
-- [ ] Chaos tests and partition scenarios
-
-### Phase 4: Polish (Weeks 11-12)
-- [ ] Browser/WebRTC integration
-- [ ] Relay budgeting and management
-- [ ] Performance tuning and profiling
-- [ ] Security audit and staged rollout
-
----
-
 ## Contributing
 
 Contributions are welcome! Please see our contribution guidelines (coming soon).
@@ -207,7 +180,7 @@ Contributions are welcome! Please see our contribution guidelines (coming soon).
 
 ## License
 
-TBD - Specify license here
+This project is MIT-0 licensed for code and CC0-1.0 licensed for non-code content.
 
 ---
 

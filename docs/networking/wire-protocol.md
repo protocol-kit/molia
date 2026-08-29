@@ -1,14 +1,15 @@
 # Wire Protocol
 
-This document defines the Molia DHT wire protocol carried over UDP and protected by the WireGuard protocol (userspace, no TUN). It complements [IO Design](io-design.md) and [WireGuard Integration](../security/wireguard-integration.md).
+This document defines the Molia DHT wire protocol carried over UDP and protected by the WireGuard protocol (userspace, no TUN). It complements [I/O Design](io-design.md) and [WireGuard Integration](../security/wireguard-integration.md).
 
 ---
 
 ## 0) Layering & Scope
 
-- Transport: UDP datagrams. Security: WireGuard data messages. One application message per datagram.
-- Pre‑handshake: node stays silent by default; see [WireGuard Integration](../security/wireguard-integration.md) and [Sybil Resistance](../security/sybil-resistance.md).
-- Encoding: Protobuf for message bodies; strict size limits. No length prefix (UDP provides framing).
+- Transport: UDP datagrams. One application message per datagram. Default is plaintext; `--wg` wraps after intro PING/PONG (see [WireGuard Integration](../security/wireguard-integration.md)).
+- Browsers: same header + body on DataChannel `molia` or `POST /rpc` ([transport §7](transport-nat-traversal.md#7-webrtc-datachannels-browser-fallback)).
+- Encoding: Protobuf for message bodies; strict size limits. No length prefix (UDP / SCTP message provides framing).
+- Canonical schema: `proto/molia.proto` (built with `prost` + `protox`).
 
 ---
 
@@ -61,8 +62,18 @@ message Capabilities {
   uint32 max_msg_bytes = 3;           // receiver’s hard ceiling
 }
 
-message Ping { uint64 now_unix_ms = 1; }
-message Pong { uint64 now_unix_ms = 1; }
+message Ping {
+  uint64 now_unix_ms = 1;
+  bytes x25519_pubkey = 2;   // --wg intro
+  bytes ed25519_pubkey = 3;
+  bytes binding_sig = 4;     // Ed25519 over molia-wg-bind-v1 ‖ ed ‖ x25519
+}
+message Pong {
+  uint64 now_unix_ms = 1;
+  bytes x25519_pubkey = 2;
+  bytes ed25519_pubkey = 3;
+  bytes binding_sig = 4;
+}
 
 message FindNodeReq { bytes target_id = 1; uint32 limit = 2; }
 message FindNodeResp { repeated Peer peers = 1; }
@@ -71,6 +82,7 @@ message Peer {
   bytes peer_id = 1;                  // PeerId
   repeated Addr addrs = 2;            // reachable addresses (scoped)
   uint32 rtt_ms = 3;                  // optional hint
+  bytes x25519_pubkey = 4;            // for --wg after FIND_NODE
 }
 
 message FindValueReq { bytes key = 1; uint32 provider_limit = 2; }
@@ -85,7 +97,11 @@ message FindValueResp {
 message Providers { repeated Provider providers = 1; }
 message Provider  { bytes peer_id = 1; bytes meta = 2; }
 
-message StoreReq { bytes record = 1; }
+message StoreReq {
+  bytes record = 1;
+  bytes admission_token = 2;
+  bytes cost_stamp = 3;
+}
 message StoreResp { enum Code { OK=0; REJECTED=1; TOO_LARGE=2; INVALID=3; } Code code = 1; string reason = 2; }
 
 message NegotiateReq { Capabilities want = 1; }
@@ -104,6 +120,7 @@ Notes:
 
 ## 4) Negotiation & Feature Bits
 
+- After `--wg` keys are known (intro PING/PONG), later RPCs are dummy-IPv4 + BoringTun. Mixed plaintext/`--wg` still accepts plaintext RPC.
 - First app exchange after WG: NEGOTIATE (Req/Resp) to agree capabilities and max message size.
 - Feature bits examples: 0=privacy_blinding, 1=two_hop_relay, 2=streaming_chunks, 3=erasure_hints.
 - Nodes maintain multiple handlers to allow rolling upgrades.
@@ -136,7 +153,7 @@ Notes:
 ## 8) Rate Limiting & QoS
 
 - `qos` guides scheduling: 0 control, 1 coordination, 2 hints.
-- Enforced by token buckets per peer and per `/24` (see [IO Design](io-design.md)).
+- Enforced by token buckets per peer and per `/24` (see [I/O Design](io-design.md)).
 - On RATE_LIMITED, send ERROR with optional retry_after_ms.
 
 ---
@@ -150,7 +167,7 @@ Notes:
 
 ## 10) Validation & Safety
 
-- Drop unauthenticated packets (pre‑WG) silently.
+- Without `--wg`, accept plaintext RPC. With `--wg`, intro PING/PONG stay plaintext; later datagrams that are not WG or plaintext RPC are dropped.
 - Enforce strict maximums on message sizes and repeated fields; reject oversize with TOO_LARGE.
 - Decode Protobuf over borrowed slices; fail fast on malformed inputs.
 
@@ -177,4 +194,6 @@ Notes:
 - Drop reasons: malformed, too_large, unsupported, rate_limited, budget_exhausted.
 
 ---
+
+[← Back to Networking](README.md)
 

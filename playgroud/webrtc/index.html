@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Molia WebRTC playground</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; margin: 24px; max-width: 720px; }
+    h1 { font-size: 18px; font-weight: 600; }
+    p, label { color: #bbb; }
+    code { background: #222; padding: 1px 5px; border-radius: 4px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+    input, select, button, textarea {
+      font: inherit; background: #1b1b1b; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px 8px;
+    }
+    button { cursor: pointer; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.primary { background: #2a4a3a; border-color: #3d6; }
+    #status { font-weight: 600; }
+    #log {
+      width: 100%; min-height: 220px; box-sizing: border-box; font: 12px/1.4 ui-monospace, monospace;
+      background: #111; border-color: #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>Molia WebRTC playground</h1>
+  <p>
+    Connect as <strong>Gateway</strong> to run ICE/DTLS/SCTP against this node
+    (<code>POST /rtc/offer</code>, DataChannel <code>molia</code>). Ping / Put / Get
+    then ride the channel into the local DHT. <code>POST /rpc</code> is an HTTP
+    fallback. Offerer / Answerer is optional two-tab P2P. Put keys are BLAKE3-256.
+  </p>
+  <div class="row">
+    <label>Room <input id="room" value="demo" size="10" /></label>
+    <label>Role
+      <select id="role">
+        <option value="gateway">Gateway (ICE)</option>
+        <option value="offerer">Offerer (two-tab)</option>
+        <option value="answerer">Answerer (two-tab)</option>
+      </select>
+    </label>
+    <button class="primary" id="connect" type="button">Connect</button>
+    <button id="reset" type="button">Reset room</button>
+    <span id="status">idle</span>
+  </div>
+  <div class="row">
+    <button id="ping" type="button">Ping</button>
+    <input id="putVal" value="hello" size="16" />
+    <button id="put" type="button">Put</button>
+    <input id="getKey" placeholder="key hex" size="20" />
+    <button id="get" type="button">Get</button>
+  </div>
+  <textarea id="log" readonly></textarea>
+  <script src="https://cdn.jsdelivr.net/npm/hash-wasm@4.11.0/dist/blake3.umd.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const TYPE = { Ping: 1, Pong: 2, StoreReq: 9, FindValueReq: 7 };
+    let pc = null;
+    let dc = null;
+    let corr = 1;
+    const store = new Map();
+
+    function log(line) {
+      $("log").value += line + "\n";
+      $("log").scrollTop = $("log").scrollHeight;
+    }
+
+    function setStatus(s) { $("status").textContent = s; }
+
+    function ready(_on) {}
+
+    async function gatewayRpc(bytes) {
+      const r = await fetch("/rpc", { method: "POST", body: bytes });
+      if (r.status === 204) return null;
+      if (!r.ok) throw new Error("rpc HTTP " + r.status);
+      return new Uint8Array(await r.arrayBuffer());
+    }
+
+    async function toNode(bytes) {
+      const h = decodeHeader(bytes);
+      log("tx /rpc type=" + (h ? h.type : "?") + " " + bytes.length + "B");
+      const reply = await gatewayRpc(bytes);
+      if (!reply) { log("rx (no reply)"); return; }
+      onMessage(reply);
+    }
+
+    function encodeHeader(type, flags, qos, c) {
+      const b = new Uint8Array(12);
+      b[0] = 1; b[1] = type; b[2] = flags; b[3] = qos;
+      new DataView(b.buffer).setUint32(4, c >>> 0, false);
+      return b;
+    }
+
+    function encodeVarint(n) {
+      const out = [];
+      let x = BigInt(n);
+      while (x > 127n) { out.push(Number(x & 127n) | 128); x >>= 7n; }
+      out.push(Number(x));
+      return out;
+    }
+
+    function encodeBytesField(field, bytes) {
+      return [ (field << 3) | 2, ...encodeVarint(bytes.length), ...bytes ];
+    }
+
+    function encodeVarintField(field, n) {
+      return [ (field << 3) | 0, ...encodeVarint(n) ];
+    }
+
+    function encodeStore(c, keyBytes, valBytes) {
+      const rec = [
+        ...encodeBytesField(1, keyBytes),
+        ...encodeBytesField(2, valBytes),
+        ...encodeVarintField(4, 86400),
+      ];
+      const body = encodeBytesField(1, rec);
+      const h = encodeHeader(TYPE.StoreReq, 0, 1, c);
+      const out = new Uint8Array(12 + body.length);
+      out.set(h); out.set(body, 12);
+      return out;
+    }
+
+    function encodeFind(c, keyBytes) {
+      const body = [...encodeBytesField(1, keyBytes), ...encodeVarintField(2, 16)];
+      const h = encodeHeader(TYPE.FindValueReq, 0, 1, c);
+      const out = new Uint8Array(12 + body.length);
+      out.set(h); out.set(body, 12);
+      return out;
+    }
+
+    function hexToBytes(h) {
+      const s = h.replace(/[^0-9a-f]/gi, "");
+      const out = new Uint8Array(s.length / 2);
+      for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+      return out;
+    }
+
+    function encodePing(c) {
+      const h = encodeHeader(TYPE.Ping, 0, 0, c);
+      const body = [0x08, ...encodeVarint(Date.now())];
+      const out = new Uint8Array(h.length + body.length);
+      out.set(h); out.set(body, 12);
+      return out;
+    }
+
+    function hex(bytes) {
+      return [...bytes].map((x) => x.toString(16).padStart(2, "0")).join("");
+    }
+
+    async function blake3Hex(bytes) {
+      if (!window.hashwasm || !hashwasm.blake3) {
+        throw new Error("hash-wasm BLAKE3 did not load");
+      }
+      return hashwasm.blake3(bytes);
+    }
+
+    function decodeHeader(buf) {
+      if (buf.length < 12 || buf[0] !== 1) return null;
+      const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      return { type: buf[1], flags: buf[2], correlation: v.getUint32(4, false) };
+    }
+
+    function hookDc(channel) {
+      dc = channel;
+      dc.binaryType = "arraybuffer";
+      dc.onopen = () => { setStatus("datachannel open"); ready(true); log("DataChannel " + dc.label + " open"); };
+      dc.onclose = () => { setStatus("datachannel closed"); ready(false); };
+      dc.onmessage = (ev) => onMessage(new Uint8Array(ev.data));
+    }
+
+    function send(bytes) {
+      dc.send(bytes);
+      const h = decodeHeader(bytes);
+      log("tx type=" + (h ? h.type : "?") + " " + bytes.length + "B  " + hex(bytes.slice(0, 16)) + "…");
+    }
+
+    function decodeFields(buf) {
+      const fields = [];
+      let i = 0;
+      while (i < buf.length) {
+        const tag = buf[i++];
+        const field = tag >> 3, wt = tag & 7;
+        if (wt === 0) {
+          let n = 0, s = 0;
+          while (i < buf.length) {
+            const b = buf[i++];
+            n |= (b & 127) << s;
+            if ((b & 128) === 0) break;
+            s += 7;
+          }
+          fields.push({ field, varint: n });
+        } else if (wt === 2) {
+          let len = 0, s = 0;
+          while (i < buf.length) {
+            const b = buf[i++];
+            len |= (b & 127) << s;
+            if ((b & 128) === 0) break;
+            s += 7;
+          }
+          fields.push({ field, bytes: buf.subarray(i, i + len) });
+          i += len;
+        } else {
+          break;
+        }
+      }
+      return fields;
+    }
+
+    function fieldBytes(fields, n) {
+      const f = fields.find((x) => x.field === n && x.bytes);
+      return f ? f.bytes : null;
+    }
+
+    function fieldVarint(fields, n) {
+      const f = fields.find((x) => x.field === n && x.varint !== undefined);
+      return f ? f.varint : undefined;
+    }
+
+    function onMessage(buf) {
+      const h = decodeHeader(buf);
+      if (!h) { log("rx " + buf.length + "B (not molia header)"); return; }
+      log("rx type=" + h.type + " corr=" + h.correlation + " " + buf.length + "B");
+      const body = buf.subarray(12);
+      if (h.type === TYPE.Pong) {
+        log("PONG corr=" + h.correlation);
+        return;
+      }
+      if (h.type === 10) {
+        const f = decodeFields(body);
+        const code = fieldVarint(f, 1) || 0;
+        log(code === 0 ? "STORE ok" : "STORE rejected code=" + code);
+        return;
+      }
+      if (h.type === 8) {
+        const f = decodeFields(body);
+        const rec = fieldBytes(f, 1);
+        if (!rec) { log("FIND_VALUE -> not found"); return; }
+        const rf = decodeFields(rec);
+        const val = fieldBytes(rf, 2);
+        log(val ? "FIND_VALUE -> " + new TextDecoder().decode(val) : "FIND_VALUE -> (empty)");
+        return;
+      }
+      if (h.type === TYPE.StoreReq && dc) {
+        const text = new TextDecoder().decode(body);
+        log("peer STORE " + text.slice(0, 48));
+      }
+      if (h.type === TYPE.FindValueReq && dc) {
+        log("peer FIND_VALUE");
+      }
+    }
+
+    async function poll(path, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const r = await fetch(path);
+        if (r.status === 200) {
+          const t = await r.text();
+          if (t.length) return t;
+        }
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      throw new Error("timeout waiting " + path);
+    }
+
+    function waitIceComplete(peer) {
+      if (peer.iceGatheringState === "complete") return Promise.resolve();
+      return new Promise((resolve) => {
+        const t = setTimeout(resolve, 4000);
+        peer.onicegatheringstatechange = () => {
+          if (peer.iceGatheringState === "complete") {
+            clearTimeout(t);
+            resolve();
+          }
+        };
+      });
+    }
+
+    async function connectGateway() {
+      pc = new RTCPeerConnection({ iceServers: [] });
+      hookDc(pc.createDataChannel("molia"));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitIceComplete(pc);
+      const r = await fetch("/rtc/offer", {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: pc.localDescription.sdp,
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const sdp = await r.text();
+      await pc.setRemoteDescription({ type: "answer", sdp });
+      log("got ICE/DTLS answer (" + sdp.length + " B)");
+    }
+
+    async function pollIce(room, side) {
+      let seen = 0;
+      const tick = async () => {
+        if (!pc) return;
+        const r = await fetch("/room/" + encodeURIComponent(room) + "/ice/" + side);
+        if (r.status === 200) {
+          const lines = (await r.text()).split("\n").filter(Boolean);
+          for (; seen < lines.length; seen++) {
+            const [candidate, sdpMid, idx] = lines[seen].split("|");
+            try {
+              await pc.addIceCandidate({ candidate, sdpMid, sdpMLineIndex: Number(idx) });
+              log("ice +" + side + " " + candidate.slice(0, 48));
+            } catch (e) { log("ice err " + e); }
+          }
+        }
+        if (pc) setTimeout(tick, 400);
+      };
+      tick();
+    }
+
+    $("connect").onclick = async () => {
+      const room = $("room").value.trim() || "demo";
+      const role = $("role").value;
+      const offerer = role === "offerer";
+      setStatus("connecting");
+      ready(false);
+      if (role === "gateway") {
+        try {
+          await connectGateway();
+        } catch (e) {
+          setStatus("failed");
+          log(String(e));
+        }
+        return;
+      }
+      pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) return;
+        const body = [ev.candidate.candidate, ev.candidate.sdpMid, ev.candidate.sdpMLineIndex].join("|");
+        fetch("/room/" + encodeURIComponent(room) + "/ice/" + (offerer ? "offerer" : "answerer"), {
+          method: "POST", body,
+        });
+      };
+      try {
+        if (offerer) {
+          hookDc(pc.createDataChannel("molia"));
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await fetch("/room/" + encodeURIComponent(room) + "/offer", { method: "PUT", body: offer.sdp });
+          log("published offer (" + offer.sdp.length + " B)");
+          const sdp = await poll("/room/" + encodeURIComponent(room) + "/answer", 30000);
+          await pc.setRemoteDescription({ type: "answer", sdp });
+          log("got answer");
+          pollIce(room, "answerer");
+        } else {
+          pc.ondatachannel = (ev) => hookDc(ev.channel);
+          const sdp = await poll("/room/" + encodeURIComponent(room) + "/offer", 30000);
+          await pc.setRemoteDescription({ type: "offer", sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await fetch("/room/" + encodeURIComponent(room) + "/answer", { method: "PUT", body: answer.sdp });
+          log("published answer");
+          pollIce(room, "offerer");
+        }
+      } catch (e) {
+        setStatus("failed");
+        log(String(e));
+      }
+    };
+
+    $("reset").onclick = async () => {
+      const room = $("room").value.trim() || "demo";
+      await fetch("/room/" + encodeURIComponent(room), { method: "DELETE" });
+      if (dc) try { dc.close(); } catch (_) {}
+      if (pc) try { pc.close(); } catch (_) {}
+      pc = null; dc = null;
+      ready(false);
+      setStatus("room reset");
+      log("room " + room + " cleared");
+    };
+
+    $("ping").onclick = () => {
+      if (dc && dc.readyState === "open") send(encodePing(corr++));
+      else toNode(encodePing(corr++)).catch((e) => log(String(e)));
+    };
+
+    $("put").onclick = async () => {
+      const val = $("putVal").value;
+      const bytes = new TextEncoder().encode(val);
+      const key = await blake3Hex(bytes);
+      store.set(key, val);
+      $("getKey").value = key;
+      const out = encodeStore(corr++, hexToBytes(key), bytes);
+      log("STORE " + key + " = " + val + " (BLAKE3)");
+      if (dc && dc.readyState === "open") send(out);
+      else toNode(out).catch((e) => log(String(e)));
+    };
+
+    $("get").onclick = () => {
+      const key = $("getKey").value.trim();
+      if (!key) return;
+      const out = encodeFind(corr++, hexToBytes(key));
+      if (dc && dc.readyState === "open") send(out);
+      else toNode(out).catch((e) => log(String(e)));
+    };
+  </script>
+</body>
+</html>

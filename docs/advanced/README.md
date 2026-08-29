@@ -34,7 +34,7 @@ Linux-specific fast path using `SO_REUSEPORT` with reuseport eBPF for WireGuard 
 - No cross-core handoffs for WireGuard crypto
 
 **Portability**:
-- Linux-only; other platforms use userspace demux (see [../networking/IO-DESIGN.md](../networking/IO-DESIGN.md))
+- Linux-only; other platforms use userspace demux (see [I/O Design](../networking/io-design.md))
 - Graceful fallback if eBPF not available or verifier rejects
 
 ---
@@ -61,5 +61,5 @@ Linux-specific fast path using `SO_REUSEPORT` with reuseport eBPF for WireGuard 
 
 ---
 
-[← Back to Documentation](../)
+[← Back to Documentation](../README.md)
 

@@ -1,6 +1,6 @@
-# IO Design
+# I/O Design
 
-This document specifies the IO model for the Molia DHT implementation. It aligns with [Zero-Allocation Design](../architecture/zero-allocation-design.md) and [Shared-Nothing Architecture](../architecture/shared-nothing-architecture.md).
+This document specifies the I/O model for the Molia DHT implementation. It aligns with [Zero-Allocation Design](../architecture/zero-allocation-design.md) and [Shared-Nothing Architecture](../architecture/shared-nothing-architecture.md).
 
 ---
 
@@ -9,7 +9,7 @@ This document specifies the IO model for the Molia DHT implementation. It aligns
 - Minimize syscalls and context switches via batching and per-core sharding.
 - Zero-allocation on hot paths; fixed-capacity buffers from shard-local pools.
 - Preserve XOR locality end-to-end; shard selection uses `msb_k(selfId XOR key)`.
-- Transport security via userspace WireGuard; leverage existing library (e.g., [BoringTun](https://github.com/cloudflare/boringtun)).
+- Transport security via optional userspace WireGuard (`--wg`, [BoringTun](https://github.com/cloudflare/boringtun)). Browser path is a separate HTTP + ICE thread, not the shard loop.
 - Cross-platform: Linux (first-class), macOS (kqueue), Windows (future).
 
 ---
@@ -86,7 +86,7 @@ This document specifies the IO model for the Molia DHT implementation. It aligns
 
 ---
 
-## 9) NAT Traversal IO
+## 9) NAT Traversal I/O
 
 - Keepalives to maintain NAT mappings; cadence adaptive to NAT type.
 - Hole punching: coordinate timing with rendezvous; exploit simultaneous open when possible.
@@ -148,12 +148,12 @@ This document specifies the IO model for the Molia DHT implementation. It aligns
 
 ---
 
-## 16) Persistent Peerstore IO
+## 16) Persistent Peerstore I/O
 
 - **Per-shard layout**
   - Directory per shard: `peerstore/shard-<id>/`.
-  - Files: `snapshot.bin` (compact state), `wal.log` (append-only), `compaction.tmp` (atomic replace).
-  - Records are length-prefixed with checksum (e.g., `len:u32 | type:u8 | payload | crc32c:u32`).
+  - Files: `snapshot.bin` (compact state), `wal.log` (append-only peers + DHT records), `compaction.tmp` (atomic replace).
+  - Frames: `len:u32 | type:u8 | payload | crc32:u32`. type 1 peer upsert, 2 peer tombstone, 3 protobuf `Record`.
 
 - **Write path (non-blocking)**
   - Mutations (insert/update/evict/score) enqueue a small POD record to a shard-local bounded SPSC ring.
@@ -176,7 +176,7 @@ This document specifies the IO model for the Molia DHT implementation. It aligns
 
 - **Backpressure & isolation**
   - If writer falls behind, drop least-important mutation kinds first (e.g., soft score updates) while preserving critical events (new peers, tombstones).
-  - Never block shard network loop on disk; writer has its own low-priority runtime within the shard.
+  - Never block shard network loop on disk; the writer is a cooperative low-priority drain on the same shard event loop (no separate async runtime).
 
 - **Portability notes**
   - Linux: prefer `fdatasync`; macOS: `F_FULLFSYNC` when `strict` is requested; Windows (future): `FlushFileBuffers`.
@@ -190,4 +190,8 @@ This document specifies the IO model for the Molia DHT implementation. It aligns
   - Power-failure simulation: kill during write/flush/rename; verify recovery.
   - Corruption injection: flip bits in WAL; confirm detection and clean stop.
   - High-churn soak: ensure writer keeps up without impacting shard latency.
+
+---
+
+[← Back to Networking](README.md)
 

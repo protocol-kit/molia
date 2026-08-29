@@ -18,19 +18,19 @@ Specifies the I/O model aligned with shared-nothing and zero-allocation principl
 
 ### [Transport & NAT Traversal](transport-nat-traversal.md)
 Details the transport stack and NAT traversal strategies. Covers:
-- UDP + userspace WireGuard (BoringTun)
+- UDP; optional userspace WireGuard (BoringTun, `--wg`)
 - Session management and endpoint rebinding
 - NAT classification (full-cone, restricted, symmetric)
 - UDP hole punching with rendezvous coordination
 - TURN-like relays as last resort (strict budgets)
-- WebRTC DataChannels for browser fallback
+- WebRTC ICE/DTLS/SCTP (`--webrtc-gateway`, str0m) for browsers
 - MTU discovery and path MTU clamping
 - Abuse resistance at transport layer
 
 **Goal**: Direct connectivity first, hole-punch if needed, relay as last resort.
 
 ### [Wire Protocol](wire-protocol.md)
-Defines the application-layer protocol carried over WireGuard. Covers:
+Defines the application-layer protocol (UDP, `--wg`, or WebRTC DataChannel). Covers:
 - Fixed header: version, type, flags, QoS, correlation ID
 - Message types: PING/PONG, NEGOTIATE, FIND_NODE, FIND_VALUE, STORE, ANNOUNCE_PROVIDER
 - Protobuf schemas for all RPCs
@@ -55,5 +55,5 @@ All three are designed for zero-allocation hot paths and shared-nothing architec
 
 ---
 
-[← Back to Documentation](../)
+[← Back to Documentation](../README.md)
 

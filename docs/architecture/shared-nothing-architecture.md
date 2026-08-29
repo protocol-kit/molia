@@ -31,7 +31,7 @@ This document specifies a shared-nothing architecture for the Molia DHT implemen
 
 ## 2) Threading & Runtimes
 
-- **One Event Loop per Shard**: Single-threaded reactor per shard (tokio current-thread or custom loop).
+- **One Event Loop per Shard**: Custom single-threaded reactor per shard (no Tokio). Drive UDP, timers, and cross-shard rings directly; do not introduce an async runtime.
 - **Core Affinity**: Pin shard threads to dedicated cores where the OS permits.
 - **No Cross-Shard Locks**: No `Mutex`/`RwLock` across shards. Use lock-free SPSC rings or bounded MPSC channels.
 - **I/O**: Each shard owns its UDP socket (see §3) and timers. Background tasks (erasure coding, GC) run within the shard.
@@ -260,3 +260,7 @@ This document specifies a shared-nothing architecture for the Molia DHT implemen
 - Routing, lookups, provider ops owned by shards.
 - Backpressure policies enforced on channels.
 - Tests: zero-alloc on hot paths; chaos restart; rebalancing.
+
+---
+
+[← Back to Architecture](README.md)

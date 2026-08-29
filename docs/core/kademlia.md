@@ -1,5 +1,7 @@
 # Kademlia — Notes & Implementation Guide
 
+This note covers the original Kademlia algorithm (typically 160-bit IDs, **α** ≈ 2–4). Molia keeps XOR routing and k-buckets, with **256-bit IDs** (`BLAKE3` of Ed25519), default **k = 20**, and adaptive **α = 4** (range 3–8). See [Architecture Overview](../overview.md) and [Molia enhancements](README.md#molia-enhancements).
+
 ---
 
 ## 1) What is Kademlia (in one line)
@@ -8,7 +10,7 @@ Give every node and piece of content a large random ID; define “closeness” w
 ---
 
 ## 2) Core concepts
-- **Keyspace & IDs:** Nodes and content keys live in the same b-bit space (commonly 160).  
+- **Keyspace & IDs:** Nodes and content keys live in the same b-bit space (original paper: 160; Molia: 256).  
 - **Distance:** \(d(x,y) = x \oplus y\) (bitwise XOR). Smaller integers are closer.  
 - **k-buckets:** The routing table is partitioned into buckets covering exponential distance ranges \([2^i, 2^{i+1})\) from *your own ID*. Each bucket stores up to **k** contacts, ordered by LRU (least-recently-seen first).  
 - **RPCs:** `PING`, `STORE(key,value)`, `FIND_NODE(targetID)`, `FIND_VALUE(key)`.  
@@ -190,3 +192,5 @@ This layout guarantees coverage at every XOR “scale,” enabling logarithmic-t
 - Petar Maymounkov, David Mazieres. **“Kademlia: A Peer-to-Peer Information System Based on the XOR Metric.”** IPTPS 2002.
 
 ---
+
+[← Back to Core Concepts](README.md)

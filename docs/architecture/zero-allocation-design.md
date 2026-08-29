@@ -27,7 +27,7 @@ This document specifies a zero-allocation (or strictly bounded-allocation) strat
 ## 2) Hot-Path Map & Zero-Alloc Tactics
 
 ### 2.1 RX Path (UDP → Decode)
-- Preallocate a ring of packet buffers sized to wire MTU (e.g., 1232–1400 bytes) and a few jumbo buffers for edge cases.
+- Preallocate a ring of packet buffers sized to the PMTU ceiling (safe floor 1200 bytes; typical 1232–1400) and a few jumbo buffers for edge cases.
 - Batch receive when platform supports it (Linux `recvmmsg`/`sendmmsg`; fall back to single I/O on other OSes) while reusing buffers.
 - Decode directly from borrowed byte slices using a zero-copy codec.
 
@@ -54,7 +54,7 @@ This document specifies a zero-allocation (or strictly bounded-allocation) strat
 
 ## 4) Data Structures (Hot Path)
 
-- **K-Buckets**: `ArrayVec<PeerEntry, K_MAX>` with K_MAX = 32. LRU via index dance (swap-with-end or small ring of indices). No heap on touch/move.
+- **K-Buckets**: `ArrayVec<PeerEntry, K_MAX>` with `K_MAX = 32` (default **K = 20**). LRU via index dance (swap-with-end or small ring of indices). No heap on touch/move.
 - **Candidate Sets (Lookups)**: `SmallVec<[Candidate; 64]>` sized to expected frontier; switch to fixed-capacity binary heap if needed.
 - **Bloom Filters / Hints**: Use `arrayvec`-backed bitsets or fixed-size bit arrays for path caching hints.
 - **Peerstore**: Backed by `slab` for stable indices; buckets store indices, not owned structs.
@@ -63,11 +63,12 @@ This document specifies a zero-allocation (or strictly bounded-allocation) strat
 
 ## 5) Wire Encoding & Framing
 
-- Prefer a zero-copy capable format for hot RPCs. Options:
-  - **Cap’n Proto**: in-place reads; builders reuse pooled buffers.
-  - **FlatBuffers**: similar zero-copy semantics for reading.
-  - If using **Protobuf (prost)**: restrict to `bytes` fields and decode into borrowed views using `Bytes` from a pool; avoid string allocations on hot path.
-- Length-delimited frames; decoder operates over borrowed slices; encoder writes directly into preallocated output buffer.
+- **Encoding**: Protocol Buffers (`prost`), matching the [Wire Protocol](../networking/wire-protocol.md).
+- Zero-copy constraints on the hot path:
+  - Restrict hot RPCs to `bytes` fields; decode into borrowed views using pooled `Bytes`.
+  - Avoid `string` allocations on the hot path.
+  - Encoder writes directly into a preallocated output buffer.
+- Framing: fixed header + Protobuf body; no extra length prefix (UDP datagram size is the frame). Decoder operates over borrowed slices of the datagram after the header.
 - Strict size limits to prevent oversized allocations; preflight length checks before building responses.
 
 ---
@@ -125,7 +126,7 @@ Suggested crates/tools:
 1. Introduce buffer pool and bump arena modules; switch RX/TX paths to pooled buffers.
 2. Replace buckets with fixed-capacity `ArrayVec` + index-based LRU.
 3. Convert lookup frontier/visited to `SmallVec`/fixed heaps; preallocate α request contexts.
-4. Move hot RPCs to zero-copy codec (Cap’n Proto or borrowed `prost`); enforce length limits.
+4. Move hot RPCs to borrowed `prost` decode over pooled buffers; enforce size limits.
 5. Add allocation-count tests/benches; wire into CI thresholds.
 6. Gradually expand coverage (provider announcements, erasure coding, privacy features) while keeping hot paths allocation-free.
 
@@ -147,4 +148,7 @@ Suggested crates/tools:
 - Codec: zero-copy reads; pooled buffer writes; size limits enforced.
 - Bench + CI: allocation counters and latency budgets met.
 
+---
+
+[← Back to Architecture](README.md)
 

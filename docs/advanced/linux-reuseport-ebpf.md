@@ -134,3 +134,7 @@ Notes:
 3. Wire WG handshake completion to update `rx_index_to_slot`.
 4. Benchmark selection accuracy and CPU cost; verify no regressions under churn.
 5. Add metrics and fallbacks; test on multiple kernel versions.
+
+---
+
+[← Back to Advanced](README.md)

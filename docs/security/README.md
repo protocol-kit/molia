@@ -20,7 +20,9 @@ Specifies per-shard WireGuard integration for transport security. Covers:
 
 **Library**: [BoringTun](https://github.com/cloudflare/boringtun) (userspace WireGuard in Rust)
 
-**Security Model**: Silent by default; no response before valid handshake.
+**Crate**: `--wg` intro PING/PONG stay plaintext (X25519 + binding sig); later RPCs encapsulate. Without `--wg`, RPC is plaintext UDP.
+
+**Design target**: Silent by default; no response before valid handshake.
 
 ### [Sybil Resistance](sybil-resistance.md)
 Mechanisms to resist Sybil attacks and general abuse. Covers:
@@ -36,6 +38,9 @@ Mechanisms to resist Sybil attacks and general abuse. Covers:
 **Threat Model**: Adversary can spawn many identities, spoof metadata, attempt DoS.
 
 **Defense-in-Depth**: PoW + cookies + tokens + rate limits + behavioral scoring.
+
+### [WireGuard Example](wireguard-example.rs)
+Illustrative BoringTun `Tunn` sketch for handshake and encapsulate/decapsulate. Production Molia feeds DHT RPC bytes into the same APIs — no OS TUN device.
 
 ---
 
@@ -59,5 +64,5 @@ Each layer is stateless or low-state on the fast path to avoid DoS amplification
 
 ---
 
-[← Back to Documentation](../)
+[← Back to Documentation](../README.md)
 

@@ -22,9 +22,7 @@ Leverage the unencrypted ephemeral public key in WireGuard Initiation to enforce
 - Publishing `(Ns, d)`: nodes publish the current puzzle nonce `Ns` and difficulty `d` via:
   - Peer discovery records (gossiped capability fields).
 - Clients are expected to fetch `(Ns, d)` out‑of‑band and solve before sending Initiation.
-- If not satisfied, respond with Cookie Reply carrying `
-(Ns, d)`; client re‑initiates with a new ephemeral that 
-passes.
+- If not satisfied, respond with Cookie Reply carrying `(Ns, d)`; client re-initiates with a new ephemeral that passes.
 - Properties:
   - No protocol changes: the ephemeral is already public in Initiation; clients can re‑draw ephemerals.
   - Stateless on the fast path: verification is a single hash.
@@ -74,7 +72,7 @@ loop {
 ## 4) Operation‑Level Cost Stamping
 
 - For spam‑sensitive ops (e.g., `ANNOUNCE_PROVIDER`, `STORE`), require a small, verifiable client‑side cost stamp:
-  - Hashcash‑like: `BLAKE3(key || salt || nonce)` ≥ difficulty.
+  - Hashcash-like: `BLAKE3(key || salt || nonce)` has at least `d` leading zero bits.
   - Difficulty tuned per op and network health; verify is O(1) hash.
 - Combine with per‑peer quotas and per‑prefix budgets to prevent flooding hotspots.
 
@@ -141,3 +139,7 @@ loop {
 ## 12) References
 
 - Userspace WireGuard engine (for integration and handshake context): [BoringTun](https://github.com/cloudflare/boringtun)
+
+---
+
+[← Back to Security](README.md)
